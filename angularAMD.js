@@ -1,3 +1,8 @@
+/*
+ angularAMD v0.1.1
+ (c) 2013-2014 Marcos Lin https://github.com/marcoslin/
+ License: MIT
+*/
 /*jslint node: true, vars: true, nomen: true */
 /*globals define, angular */
 
@@ -7,7 +12,8 @@ define(function () {
         alternate_queue = [],
         app_name,
         app_injector,
-        app_cached_providers = {};
+        app_cached_providers = {},
+        config_injector; // store the captured providerInjector (config-time injector)
     
     // Private method to check if angularAMD has been initialized
     function checkAngularAMDInitialized() {
@@ -74,9 +80,7 @@ define(function () {
     
     
     // Constructor
-    function angularAMD() {
-        var that = this;
-    }
+    function angularAMD() {}
     
     
     /**
@@ -166,7 +170,12 @@ define(function () {
                     args = q[2];
                 
                 if (app_cached_providers.hasOwnProperty(provider)) {
-                    var cachedProvider = app_cached_providers[provider];
+                    var cachedProvider;
+                    if (provider === "$injector" && method === "invoke") {
+                        cachedProvider = config_injector;
+                    } else {
+                        cachedProvider = app_cached_providers[provider];
+                    }
                     //console.log("'" + item.name + "': applying " + provider + "." + method + " for args: ", args);
                     cachedProvider[method].apply(null, args);
                 } else {
@@ -253,12 +262,13 @@ define(function () {
         if (typeof enable_ngload === 'undefined') {
             enable_ngload = true;
         }
-        elem = elem || document;
+        elem = elem || document.documentElement;
         
         // Cache provider needed
         app.config(
-            ['$controllerProvider', '$compileProvider', '$filterProvider', '$animateProvider', '$provide', function (controllerProvider, compileProvider, filterProvider, animateProvider, provide) {
+            ['$controllerProvider', '$compileProvider', '$filterProvider', '$animateProvider', '$provide', '$injector', function (controllerProvider, compileProvider, filterProvider, animateProvider, provide, injector) {
                 // Cache Providers
+                config_injector = injector;
                 app_cached_providers = {
                     $controllerProvider: controllerProvider,
                     $compileProvider: compileProvider,
@@ -276,7 +286,7 @@ define(function () {
                     service: provide.service,
                     constant: provide.constant,
                     value: provide.value,
-                    animation: animateProvider.register
+                    animation: angular.bind(animateProvider, animateProvider.register)
                 };
             
             }]

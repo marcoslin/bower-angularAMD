@@ -1,3 +1,8 @@
+/*
+ angularAMD v0.1.1
+ (c) 2013-2014 Marcos Lin https://github.com/marcoslin/
+ License: MIT
+*/
 /*jslint node: true, vars: true, nomen: true */
 /*globals define */
 
