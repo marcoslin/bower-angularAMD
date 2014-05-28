@@ -11,10 +11,10 @@
     "authors": [
         "Marcos Lin (https://github.com/marcoslin/)"
     ],
-    "repository": [
+    "repository": {
         "type": "git",
         "url": "git@github.com:marcoslin/angularAMD.git"
-    ],
+    },
     "dependencies": {
         "angular": "~1.2.0"
     }
