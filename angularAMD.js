@@ -1,23 +1,38 @@
-/*
- angularAMD v0.1.1
+/*!
+ angularAMD v0.2.0
  (c) 2013-2014 Marcos Lin https://github.com/marcoslin/
  License: MIT
 */
-/*jslint node: true, vars: true, nomen: true */
-/*globals define, angular */
-
 define(function () {
-    var orig_angular,
-        alt_angular,
-        alternate_queue = [],
+    var bootstrapped = false,
+
+        // Used in .bootstrap
         app_name,
-        app_injector,
+        orig_app,
+        alt_app,
+        run_injector,
+        config_injector,
         app_cached_providers = {},
-        config_injector; // store the captured providerInjector (config-time injector)
+
+        // Used in setAlternateAngular(), alt_angular is set to become angular.module
+        orig_angular,
+        alt_angular,
+
+        // Object that wrap the provider methods that enables lazy loading
+        onDemandLoader = {},
+        preBootstrapLoaderQueue = [],
+
+        // Used in setAlternateAngular() and .processQueue
+        alternate_modules = {},
+        alternate_modules_tracker = {},
+        alternate_queue = [],
+
+        // Used by angularAMD provider methods and .bootstrap
+        deferred_providers = [];
     
     // Private method to check if angularAMD has been initialized
-    function checkAngularAMDInitialized() {
-        if ( typeof orig_angular === 'undefined' ) {
+    function checkBootstrapped() {
+        if ( !bootstrapped ) {
             throw Error("angularAMD not initialized.  Need to call angularAMD.bootstrap(app) first.");
         }
     }
@@ -35,50 +50,55 @@ define(function () {
      * object into the current ng-app.  As result, if there are subsequent call to retrieve the
      * module post processQueue, it would retrieve a module that is not integrated into the ng-app.
      * 
-     * Therefore, any subsequent angular.module call to retrieve the module created with alternate
-     * angular will return undefined.
-     * 
+     * Therefore, any subsequent to call to angular.module after processQueue should return undefined
+     * to prevent obtaining a duplicated object.  However, it is critical that angular.module return
+     * appropriate object *during* processQueue.
      */
     function setAlternateAngular() {
-        var alternateModules = {};
-        
         // This method cannot be called more than once
         if (alt_angular) {
             throw Error("setAlternateAngular can only be called once.");
         } else {
             alt_angular = {};
         }
-        
-        // Make sure that bootstrap has been called
-        checkAngularAMDInitialized();
 
-        // Createa a copy of orig_angular
+        // Make sure that bootstrap has been called
+        checkBootstrapped();
+
+        // Create a a copy of orig_angular with on demand loading capability
         orig_angular.extend(alt_angular, orig_angular);
-        
+
         // Custom version of angular.module used as cache
         alt_angular.module = function (name, requires) {
-            
             if (typeof requires === "undefined") {
-                // Return undefined if module was created using the alt_angular
-                if (alternateModules.hasOwnProperty(name)) {
-                    return undefined;
+                // Return module from alternate_modules if it was created using the alt_angular
+                if (alternate_modules_tracker.hasOwnProperty(name)) {
+                    return alternate_modules[name];
                 } else {
                     return orig_angular.module(name);
                 }
             } else {
-                //console.log("alt_angular.module START for '" + name + "': ", arguments);
                 var orig_mod = orig_angular.module.apply(null, arguments),
                     item = { name: name, module: orig_mod};
                 alternate_queue.push(item);
-                alternateModules[name] = orig_mod;
+                orig_angular.extend(orig_mod, onDemandLoader);
+                
+                /*
+                Use `alternate_modules_tracker` to track which module has been created by alt_angular
+                but use `alternate_modules` to cache the module created.  This is to simplify the
+                removal of cached modules after .processQueue.
+                */
+                alternate_modules_tracker[name] = true;
+                alternate_modules[name] = orig_mod;
+                
+                // Return created module
                 return orig_mod;
             }
         };
                 
         window.angular = alt_angular;
-    };
-    
-    
+    }
+
     // Constructor
     function angularAMD() {}
     
@@ -100,13 +120,26 @@ define(function () {
         var load_controller;
 
         /*
-        If controllerUrl is provided, load the provided Url using requirejs. Otherwise,
-        attempt to load the controller using the controller name.  In the later case,
-        controller name is expected to be defined as one of 'paths' in main.js. 
+        If `controllerUrl` is provided, load the provided Url using requirejs.  If `controller` is not provided
+        but `controllerUrl` is, assume that module to be loaded will return a function to act as controller.
+
+        Otherwise, attempt to load the controller using the controller name.  In the later case, controller name
+        is expected to be defined as one of 'paths' in main.js.
         */
         if ( config.hasOwnProperty("controllerUrl") ) {
             load_controller = config.controllerUrl;
             delete config.controllerUrl;
+            if (typeof config.controller === "undefined") {
+                // Only controllerUrl is defined.  Attempt to set the controller to return value of package loaded.
+                config.controller = [
+                    "$scope", "__AAMDCtrl", "$injector",
+                    function ($scope, __AAMDCtrl, $injector) {
+                        if (typeof __AAMDCtrl !== "undefined" ) {
+                            $injector.invoke(__AAMDCtrl, this, { "$scope": $scope });
+                        }
+                    }
+                ];
+            }
         } else if (typeof config.controller === 'string') {
             load_controller = config.controller;
         }
@@ -114,27 +147,26 @@ define(function () {
         // If controller needs to be loaded, append to the resolve property
         if (load_controller) {
             var resolve = config.resolve || {};
-            resolve['__load'] = ['$q', '$rootScope', function ($q, $rootScope) {
+            resolve['__AAMDCtrl'] = ['$q', '$rootScope', function ($q, $rootScope) { // jshint ignore:line
                 var defer = $q.defer();
-                require([load_controller], function () {
-                    defer.resolve();
+                require([load_controller], function (ctrl) {
+                    defer.resolve(ctrl);
                     $rootScope.$apply();
                 });
                 return defer.promise;
-            }]
+            }];
             config.resolve = resolve;
         }
-        
-        
+
         return config;
     };
     
     
     /**
-     * Expose name of the app that has been bootstraped
+     * Expose name of the app that has been bootstrapped
      */
     angularAMD.prototype.appname = function () {
-        checkAngularAMDInitialized();
+        checkBootstrapped();
         return app_name;
     };
     
@@ -150,18 +182,23 @@ define(function () {
      * and _runBlock private variable.  Must test carefully with each release of angular.
      */
     angularAMD.prototype.processQueue = function () {
-        checkAngularAMDInitialized();
+        checkBootstrapped();
         
         if (typeof alt_angular === 'undefined') {
             throw Error("Alternate angular not set.  Make sure that `enable_ngload` option has been set when calling angularAMD.bootstrap");
         }
         
         // Process alternate queue in FIFO fashion
+        function processRunBlock(block) {
+            //console.info("'" + item.name + "': executing run block: ", run_block);
+            run_injector.invoke(block);
+        }
+
         while (alternate_queue.length) {
             var item = alternate_queue.shift(),
                 invokeQueue = item.module._invokeQueue,
                 y;
-        
+
             // Setup the providers define in the module
             for (y = 0; y < invokeQueue.length; y += 1) {
                 var q = invokeQueue[y],
@@ -176,7 +213,7 @@ define(function () {
                     } else {
                         cachedProvider = app_cached_providers[provider];
                     }
-                    //console.log("'" + item.name + "': applying " + provider + "." + method + " for args: ", args);
+                    // console.info("'" + item.name + "': applying " + provider + "." + method + " for args: ", args);
                     cachedProvider[method].apply(null, args);
                 } else {
                     console.error("'" + provider + "' not found!!!");
@@ -186,14 +223,14 @@ define(function () {
             
             // Execute the run block of the module
             if (item.module._runBlocks) {
-                angular.forEach(item.module._runBlocks, function processRunBlock(block) {
-                    //console.log("'" + item.name + "': executing run block: ", run_block);
-                    app_injector.invoke(block);
-                });
+                angular.forEach(item.module._runBlocks, processRunBlock);
             }
             
-            // How to remove the module??? 
-            orig_angular.module(item.name, [], orig_angular.noop);
+            /*
+            Clear the cached modules created by alt_angular so that subsequent call to
+            angular.module will return undefined.
+            */
+            alternate_modules = {};
         }
 
     };
@@ -203,15 +240,28 @@ define(function () {
      * Return cached app provider
      */
     angularAMD.prototype.getCachedProvider = function (provider_name) {
-        checkAngularAMDInitialized();
+        checkBootstrapped();
         // Hack used for unit testing that orig_angular has been captured
-        if (provider_name === "__orig_angular") {
-            return orig_angular;
-        } else if (provider_name === "__alt_angular") {
-            return alt_angular;
-        } else {
-            return app_cached_providers[provider_name];
+        var cachedProvider;
+
+        switch(provider_name) {
+            case "__orig_angular":
+                cachedProvider = orig_angular;
+                break;
+            case "__alt_angular":
+                cachedProvider = alt_angular;
+                break;
+            case "__orig_app":
+                cachedProvider = orig_app;
+                break;
+            case "__alt_app":
+                cachedProvider = alt_app;
+                break;
+            default:
+                cachedProvider = app_cached_providers[provider_name];
         }
+
+        return cachedProvider;
     };
     
     /**
@@ -219,8 +269,18 @@ define(function () {
      * Designed primarly to be used during unit testing.
      */
     angularAMD.prototype.inject = function () {
-        checkAngularAMDInitialized();
-        return app_injector.invoke.apply(null, arguments);
+        checkBootstrapped();
+        return run_injector.invoke.apply(null, arguments);
+    };
+
+
+    /**
+     * Create config function that uses cached config_injector.
+     * Designed to simulate app.config.
+     */
+    angularAMD.prototype.config = function () {
+        checkBootstrapped();
+        return config_injector.invoke.apply(null, arguments);
     };
     
     /**
@@ -233,17 +293,27 @@ define(function () {
         
         // Restore original angular instance
         window.angular = orig_angular;
-        
-        // Clear private variables
+
+        // Clear stored app
+        orig_app = undefined;
+        alt_app = undefined;
+
+        // Clear original angular
         alt_angular = undefined;
+        orig_angular = undefined;
+        onDemandLoader = {};
+        preBootstrapLoaderQueue = [];
+
+        // Clear private variables
         alternate_queue = [];
         app_name = undefined;
-        app_injector = undefined;
+        run_injector = undefined;
+        config_injector = undefined;
         app_cached_providers = {};
-        
-        // Clear original angular
-        orig_angular = undefined;
-    }
+
+        // Clear bootstrap flag but there is no way to un-bootstrap AngularJS
+        bootstrapped = false;
+    };
     
     /**
      * Initialization of angularAMD that bootstraps AngularJS.  The objective is to cache the
@@ -253,15 +323,23 @@ define(function () {
      */
     angularAMD.prototype.bootstrap = function (app, enable_ngload, elem) {
         // Prevent bootstrap from being called multiple times
-        if (typeof orig_angular !== 'undefined') {
+        if (bootstrapped) {
             throw Error("bootstrap can only be called once.");
         }
-        
-        // Store reference to original angular which also used to check if bootstrap has take place.
-        orig_angular = angular;
+
         if (typeof enable_ngload === 'undefined') {
             enable_ngload = true;
         }
+
+        // Store reference to original angular and app
+        orig_angular = angular;
+
+        // Create new version of app
+        orig_app = app;
+        alt_app = {};
+        orig_angular.extend(alt_app, orig_app);
+
+        // Determine element to bootstrap angular
         elem = elem || document.documentElement;
         
         // Cache provider needed
@@ -276,44 +354,124 @@ define(function () {
                     $animateProvider: animateProvider,
                     $provide: provide
                 };
-                
-                // Create a app.register object
-                app.register = {
-                    controller: controllerProvider.register,
-                    directive: compileProvider.directive,
-                    filter: filterProvider.register,
-                    factory: provide.factory,
-                    service: provide.service,
-                    constant: provide.constant,
-                    value: provide.value,
+
+                // Substitue provider methods from app call the cached provider
+                angular.extend(onDemandLoader, {
+                    provider : function(name, constructor) {
+                        provide.provider(name, constructor);
+                        return this;
+                    },
+                    controller : function(name, constructor) {
+                        controllerProvider.register(name, constructor);
+                        return this;
+                    },
+                    directive : function(name, constructor) {
+                        compileProvider.directive(name, constructor);
+                        return this;
+                    },
+                    filter : function(name, constructor) {
+                        filterProvider.register(name, constructor);
+                        return this;
+                    },
+                    factory : function(name, constructor) {
+                        // console.log("onDemandLoader.factory called for " + name);
+                        provide.factory(name, constructor);
+                        return this;
+                    },
+                    service : function(name, constructor) {
+                        provide.service(name, constructor);
+                        return this;
+                    },
+                    constant : function(name, constructor) {
+                        provide.constant(name, constructor);
+                        return this;
+                    },
+                    value : function(name, constructor) {
+                        provide.value(name, constructor);
+                        return this;
+                    },
                     animation: angular.bind(animateProvider, animateProvider.register)
-                };
-            
+                });
+                angular.extend(alt_app, onDemandLoader);
+
             }]
         );
         
         // Get the injector for the app
         app.run(['$injector', function ($injector) {
             // $injector must be obtained in .run instead of .config
-            app_injector = $injector;
-            app_cached_providers.$injector = app_injector;
+            run_injector = $injector;
+            app_cached_providers.$injector = run_injector;
         }]);
         
         // Store the app name needed by .bootstrap function.
         app_name = app.name;
-        
+
+        // If there are angular provider recipe queued up, process it
+        if (preBootstrapLoaderQueue.length > 0) {
+            for (var iq = 0; iq < preBootstrapLoaderQueue.length; iq += 1) {
+                var item = preBootstrapLoaderQueue[iq];
+                orig_app[item.recipe](item.name, item.const);
+            }
+            preBootstrapLoaderQueue = [];
+        }
+
+        // Create a app.register object to keep backward compatibility
+        orig_app.register = onDemandLoader;
+
         // Bootstrap Angular
         orig_angular.element(document).ready(function () {
-            orig_angular.bootstrap(elem, [app_name]); 
+            orig_angular.bootstrap(elem, [app_name]);
+            // Indicate bootstrap completed
+            bootstrapped = true;
+
+            // Replace angular.module
+            if (enable_ngload) {
+                //console.info("Setting alternate angular");
+                setAlternateAngular();
+            }
         });
-        
-        // Replace angular.module
-        if (enable_ngload) {
-            //console.log("Setting alternate angular");
-            setAlternateAngular();
-        }
-    };  
-    
+
+        // Return app
+        return alt_app;
+    };
+
+    // Define provider
+    function executeProvider(providerRecipe) {
+        return function (name, constructor) {
+            if (bootstrapped) {
+                onDemandLoader[providerRecipe](name, constructor);
+            } else {
+                // Queue up the request to be used during .bootstrap
+                preBootstrapLoaderQueue.push({
+                    "recipe": providerRecipe,
+                    "name": name,
+                    "const": constructor
+                });
+            }
+            return this;
+        };
+    }
+
+    // .provider
+    angularAMD.prototype.provider = executeProvider("provider");
+    // .controller
+    angularAMD.prototype.controller = executeProvider("controller");
+    // .directive
+    angularAMD.prototype.directive = executeProvider("directive");
+    // .filter
+    angularAMD.prototype.filter = executeProvider("filter");
+    // .factory
+    angularAMD.prototype.factory = executeProvider("factory");
+    // .service
+    angularAMD.prototype.service = executeProvider("service");
+    // .constant
+    angularAMD.prototype.constant = executeProvider("constant");
+    // .value
+    angularAMD.prototype.value = executeProvider("value");
+    // .animation
+    angularAMD.prototype.animation = executeProvider("animation");
+
     // Create a new instance and return
     return new angularAMD();
     
