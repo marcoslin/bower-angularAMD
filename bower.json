@@ -1,7 +1,7 @@
 {
     "name": "angularAMD",
     "description": "Facilitate use of RequireJS in AngularJS ",
-    "version": "0.1.1",
+    "version": "0.2.1",
     "main": "angularAMD.js",
     "license": "MIT",
     "keywords": [
@@ -16,6 +16,7 @@
         "url": "git@github.com:marcoslin/angularAMD.git"
     },
     "dependencies": {
-        "angular": "~1.2.0"
+        "angular": "~1.2.0",
+	"requirejs": "~2.1.0"
     }
 }
