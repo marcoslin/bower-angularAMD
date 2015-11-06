@@ -1,4 +1,4 @@
-# packaged angular-route
+# packaged angular-amd
 
 This repo is for distribution on `npm` and `bower`. The source for this module is in the
 [main angularAMD repo](https://github.com/marcoslin/angularAMD).
